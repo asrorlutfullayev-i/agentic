@@ -1,14 +1,15 @@
-﻿# handlers/ai_chat.py — Asosiy AI suhbat, rasm, fayl, ovoz va search handler
+# handlers/ai_chat.py — Tezkor va xavfsiz AI suhbat handler
 import re
 import logging
 from datetime import datetime, timedelta
 from aiogram import Router, F
 from aiogram.types import Message
+from aiogram.exceptions import TelegramBadRequest
 from services.db import get_or_create_user, save_message, add_reminder
 from services.ai_engine import get_ai_response
 from services.context_builder import build_context
 from services.memory_manager import memory_manager
-from services.tools.web_search import web_search, image_search
+from services.tools.web_search import web_search
 from services.tools.github_search import github_search
 from services.tools.arxiv_search import arxiv_search
 from services.tools.kaggle_search import kaggle_search
@@ -22,35 +23,48 @@ router = Router()
 tz = pytz.timezone(TIMEZONE)
 
 
+async def safe_reply(message: Message, text: str, thinking_msg: Message = None):
+    """Xabarni xavfsiz yuborish (Markdown xatolarini ushlaydi va uzun xabarlarni bo'ladi)."""
+    # 4000 belgidan uzun bo'lsa bo'laklash
+    chunks = [text[i:i+4000] for i in range(0, len(text), 4000)] if len(text) > 4000 else [text]
+
+    for idx, chunk in enumerate(chunks):
+        try:
+            if idx == 0 and thinking_msg:
+                await thinking_msg.edit_text(chunk, parse_mode="Markdown")
+            else:
+                await message.answer(chunk, parse_mode="Markdown")
+        except TelegramBadRequest:
+            # Agar Markdown parsing xato bersa oddiy matn sifatida chiqaradi
+            if idx == 0 and thinking_msg:
+                await thinking_msg.edit_text(chunk, parse_mode=None)
+            else:
+                await message.answer(chunk, parse_mode=None)
+
+
 def _detect_intent(text: str) -> str:
     """Matn maqsadini aniqlash."""
     t = text.lower()
-    if any(w in t for w in ["eslat", "eslatma", "yodlatir", "reminder", "soat", "ertaga", "bugun"]):
-        if any(c.isdigit() for c in t):
-            return "reminder"
-    if any(w in t for w in ["hisob", "hisopla", "necha", "qo'sh", "ayir", "ko'payt", "bo'l"]):
+    if any(w in t for w in ["eslat", "eslatma", "yodlatir", "reminder", "ertaga", "bugun"]) and any(c.isdigit() for c in t):
+        return "reminder"
+    if any(w in t for w in ["hisobla", "hisopla", "necha", "qo'sh", "ayir", "ko'paytir"]):
         return "calculator"
     if any(w in t for w in ["github", "repo", "loyiha kodi"]):
         return "github"
-    if any(w in t for w in ["arxiv", "maqola", "paper", "research"]):
+    if any(w in t for w in ["arxiv", "maqola", "paper", "research paper"]):
         return "arxiv"
-    if any(w in t for w in ["dataset", "kaggle", "huggingface", "ma'lumotlar to'plami"]):
+    if any(w in t for w in ["dataset", "kaggle", "huggingface"]):
         return "kaggle"
-    if any(w in t for w in ["qidir", "topib ber", "internet", "web", "yangilik", "nima bu"]):
+    if any(w in t for w in ["qidir", "topib ber", "internetdan qidir"]):
         return "web_search"
-    if any(w in t for w in ["xotirimda", "eslab qol", "yodimda", "saqla", "bilasanmi meni"]):
-        return "memory_save"
-    if any(w in t for w in ["nima bilasan", "haqimda", "xotirang", "esingda", "faktlar"]):
+    if any(w in t for w in ["men haqimda nima bilasan", "xotirangdagi faktlar", "xotirangni ko'rsat"]):
         return "memory_recall"
     return "chat"
 
 
 async def _parse_reminder_time(text: str) -> datetime | None:
-    """Matndan vaqtni aniqlash."""
     now = datetime.now(tz)
     t = text.lower()
-
-    # "soat HH:MM" yoki "HH:MM da"
     time_match = re.search(r"(\d{1,2})[:\.](\d{2})", t)
     hour, minute = (int(time_match.group(1)), int(time_match.group(2))) if time_match else (None, None)
 
@@ -85,29 +99,26 @@ async def handle_text(message: Message):
     text = message.text.strip()
     intent = _detect_intent(text)
 
-    # --- REMINDER ---
+    # Typing indikatorini yoqish
+    await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
+
     if intent == "reminder":
         remind_at = await _parse_reminder_time(text)
         if remind_at:
-            r = await add_reminder(user.id, text, remind_at.astimezone(pytz.utc).replace(tzinfo=None))
+            await add_reminder(user.id, text, remind_at.astimezone(pytz.utc).replace(tzinfo=None))
             t_str = remind_at.strftime("%Y-%m-%d %H:%M")
             await message.answer(
-                f"? Eslatma saqlandi!\n\n"
-                f"?? **{text}**\n"
-                f"? Vaqt: **{t_str}** ({TIMEZONE})\n\n"
-                f"Zo'r qadam! Vaqti kelganda xabar beraman. ??",
+                f"✅ Eslatma saqlandi!\n\n📌 **{text}**\n⏰ Vaqt: **{t_str}** ({TIMEZONE})\n\nVaqti kelganda eslataman! 💪",
                 parse_mode="Markdown",
             )
             return
         else:
             await message.answer(
-                "?? Aniq vaqtni topa olmadim. Iltimos, shunday yozing:\n"
-                "_\"Ertaga soat 14:30 da menga X ni eslat\"_",
+                "⚠️ Aniq vaqtni aniqlay olmadim. Masalan:\n_\"Ertaga soat 14:30 da X ni eslat\"_",
                 parse_mode="Markdown",
             )
             return
 
-    # --- CALCULATOR ---
     if intent == "calculator":
         expr_match = re.search(r"[\d\s\+\-\*\/\^\(\)\.]+", text)
         if expr_match:
@@ -115,89 +126,80 @@ async def handle_text(message: Message):
             await message.answer(result, parse_mode="Markdown")
             return
 
-    # --- GITHUB SEARCH ---
     if intent == "github":
         query = re.sub(r"github|repo|loyiha kodi", "", text, flags=re.IGNORECASE).strip()
-        thinking = await message.answer("?? GitHub'da qidiryapman...")
+        thinking = await message.answer("🔍 GitHub'da qidiryapman...")
         result = await github_search(query or text)
-        await thinking.edit_text(result, parse_mode="Markdown")
+        await safe_reply(message, result, thinking)
         return
 
-    # --- ARXIV SEARCH ---
     if intent == "arxiv":
         query = re.sub(r"arxiv|maqola|paper|research", "", text, flags=re.IGNORECASE).strip()
-        thinking = await message.answer("?? ArXiv'da maqola qidiryapman...")
+        thinking = await message.answer("📰 ArXiv'da maqola qidiryapman...")
         result = await arxiv_search(query or text)
-        await thinking.edit_text(result, parse_mode="Markdown")
+        await safe_reply(message, result, thinking)
         return
 
-    # --- DATASET SEARCH ---
     if intent == "kaggle":
-        query = re.sub(r"dataset|kaggle|huggingface|ma'lumotlar to'plami", "", text, flags=re.IGNORECASE).strip()
-        thinking = await message.answer("?? Dataset qidiryapman...")
+        query = re.sub(r"dataset|kaggle|huggingface", "", text, flags=re.IGNORECASE).strip()
+        thinking = await message.answer("📊 Dataset qidiryapman...")
         result = await kaggle_search(query or text)
-        await thinking.edit_text(result, parse_mode="Markdown")
+        await safe_reply(message, result, thinking)
         return
 
-    # --- WEB SEARCH ---
     if intent == "web_search":
-        query = re.sub(r"qidir|topib ber|internet|web|yangilik", "", text, flags=re.IGNORECASE).strip()
-        thinking = await message.answer("?? Internetda qidiryapman...")
+        query = re.sub(r"qidir|topib ber|internetdan qidir", "", text, flags=re.IGNORECASE).strip()
+        thinking = await message.answer("🔎 Internetda qidiryapman...")
         result = await web_search(query or text)
-        await thinking.edit_text(result, parse_mode="Markdown")
+        await safe_reply(message, result, thinking)
         return
 
-    # --- MEMORY RECALL ---
     if intent == "memory_recall":
         facts = await memory_manager.recall(user.id)
         if not facts:
-            await message.answer("?? Hali sizga oid ma'lumot yo'q. Muhim narsalarni aytib qo'ying!")
+            await message.answer("🧠 Hali sizga oid ma'lumot saqlanmagan.")
         else:
-            lines = ["?? **Sizga oid eslab qolgan ma'lumotlarim:**\n"]
+            lines = ["🧠 **Siz haqingizda biladiganlarim:**\n"]
             for f in facts:
                 lines.append(f"• [{f['category']}] {f['fact']}")
             await message.answer("\n".join(lines), parse_mode="Markdown")
         return
 
-    # --- AI CHAT (barcha boshqa holatlar) ---
+    # --- ASOSIY AI JAVOB (Tezkor: ~1 soniya) ---
     await save_message(user.id, "user", text)
-    thinking = await message.answer("?? O'ylamoqda...")
+    thinking = await message.answer("⚡ Javob tayyorlanmoqda...")
 
-    context = await build_context(user.id)
+    context = await build_context(user.id, current_query=text)
     response, model_used = await get_ai_response(context)
 
     await save_message(user.id, "assistant", response)
-    await thinking.edit_text(response, parse_mode="Markdown")
+    await safe_reply(message, response, thinking)
 
-    # ML/DS vazifalarni avtomatik xotiraga saqlash
-    ml_terms = [
-        "one hot encoding", "dropout", "fine-tuning", "rag", "rlhf", "backpropagation",
-        "gradient descent", "overfitting", "regularization", "hyperparameter",
-        "cross validation", "confusion matrix", "embedding", "attention", "transformer"
-    ]
-    text_lower = text.lower()
+    # Qisqa texnik vazifalarni avtomatik xotiraga olish
+    ml_terms = ["one hot encoding", "dropout", "fine-tuning", "rag", "rlhf", "regularization", "hyperparameter"]
     for term in ml_terms:
-        if term in text_lower:
-            await memory_manager.remember(user.id, "task", f"ML/DS vazifa: {text[:100]}")
+        if term in text.lower():
+            await memory_manager.remember(user.id, "task", f"Mavzu/Vazifa: {text[:100]}")
             break
 
 
 @router.message(F.photo)
 async def handle_photo(message: Message):
     user = await get_or_create_user(telegram_id=message.from_user.id)
-    thinking = await message.answer("??? Rasmni tahlil qilyapman...")
+    await message.bot.send_chat_action(chat_id=message.chat.id, action="upload_photo")
+    thinking = await message.answer("🖼️ Rasmni tahlil qilyapman...")
 
     photo = message.photo[-1]
     file = await message.bot.get_file(photo.file_id)
     file_bytes = await message.bot.download_file(file.file_path)
     image_data = file_bytes.read()
 
-    caption = message.caption or "Bu rasmda nima bor? Batafsil tushuntir."
-    context = await build_context(user.id)
+    caption = message.caption or "Ushbu rasmni batafsil tahlil qilib ber."
+    context = await build_context(user.id, current_query=caption)
     context.append({"role": "user", "content": caption})
 
     response, _ = await get_ai_response(context, image_data=image_data)
-    await thinking.edit_text(response, parse_mode="Markdown")
+    await safe_reply(message, response, thinking)
 
 
 @router.message(F.document)
@@ -207,28 +209,18 @@ async def handle_document(message: Message):
     size_mb = doc.file_size / (1024 * 1024)
 
     if size_mb > MAX_FILE_SIZE_MB:
-        await message.answer(f"? Fayl hajmi {size_mb:.1f} MB. Maksimum {MAX_FILE_SIZE_MB} MB.")
+        await message.answer(f"❌ Fayl hajmi {size_mb:.1f} MB. Maksimum {MAX_FILE_SIZE_MB} MB.")
         return
 
-    thinking = await message.answer(f"?? '{doc.file_name}' faylini o'qimoqda...")
+    thinking = await message.answer(f"📄 '{doc.file_name}' o'qilmoqda...")
     file = await message.bot.get_file(doc.file_id)
     file_bytes_io = await message.bot.download_file(file.file_path)
     file_bytes = file_bytes_io.read()
 
     extracted_text = await extract_text_from_file(file_bytes, doc.file_name)
-    prompt = f"Quyidagi hujjatni tahlil qilib, asosiy fikrlarni va muhim ma'lumotlarni O'zbek tilida xulosala:\n\n{extracted_text[:8000]}"
+    prompt = f"Quyidagi hujjatni tahlil qilib, asosiy fikrlarni O'zbek tilida xulosala:\n\n{extracted_text[:8000]}"
 
-    context = await build_context(user.id)
+    context = await build_context(user.id, current_query=prompt)
     context.append({"role": "user", "content": prompt})
     response, _ = await get_ai_response(context)
-    await thinking.edit_text(f"?? **{doc.file_name} tahlili:**\n\n{response}", parse_mode="Markdown")
-
-
-@router.message(F.voice)
-async def handle_voice(message: Message):
-    await message.answer(
-        "??? Ovozli xabaringizni oldim!\n\n"
-        "_(Hozirda ovozni matnga o'girish funksiyasi keyingi yangilanishda qo'shiladi. "
-        "Iltimos, matn orqali yuboring.)_",
-        parse_mode="Markdown",
-    )
+    await safe_reply(message, f"📄 **{doc.file_name} tahlili:**\n\n{response}", thinking)
