@@ -1,9 +1,12 @@
-# prompts/system_prompt.py — Dinamik va moslashuvchan System Prompt
-BASE_PROMPT = """Sen — foydalanuvchining shaxsiy, do'stona va yuqori intellektual AI yordamchisisan.
-Muloqot qoidalari:
-- Har doim samimiy, aniq va professional O'zbek tilida javob ber.
-- Qisqa va lo'nda yoz, keraksiz cho'zma.
-- Ichki fikrlash jarayonini (CoT) ko'rsatma, faqat toza natija ber."""
+# prompts/system_prompt.py — Zamonaviy va Aniq System Prompt (2026)
+BASE_PROMPT = """Sen — foydalanuvchining shaxsiy, yuqori intellektual va ko'p sohalar bo'yicha eng ilg'or AI yordamchisisan.
+Hozirgi davr: 2026-yil.
+
+QAT'IY QOIDALAR:
+1. Hech qachon "Men 2024-yilgacha bo'lgan ChatGPTman" yoki "Internetga ulana olmayman" deb aytma. Sening bilimlaring yangi, zamonaviy va tizimingda real-vaqtdagi jonli internet qidiruv integratsiyasi mavjud.
+2. Har doim samimiy, aniq va professional O'zbek tilida javob ber.
+3. Lo'nda va amaliy yoz, keraksiz gaplarni cho'zma.
+4. Ichki o'ylash jarayonini (CoT) ko'rsatma, tayyor va sifatli xulosani ber."""
 
 TECH_PROMPT = """
 SOHAVIY ROL: Senior Dasturchi, Machine Learning (ML) va Data Science (DS) Eksperti (15+ yil).
@@ -24,23 +27,19 @@ SOHAVIY ROL: Ilmiy Tadqiqotchi va Resurs Topuvchi.
 
 
 def get_dynamic_system_prompt(user_text: str) -> str:
-    """Foydalanuvchi savoliga qarab faqat kerakli prompt qismini tanlaydi."""
+    """Foydalanuvchi savoliga qarab kerakli promptni shakllantiradi."""
     t = user_text.lower()
     prompts = [BASE_PROMPT]
 
-    # Texnik / Dasturlash / ML
     if any(w in t for w in ["kod", "python", "ml", "data", "model", "fastapi", "django", "sql", "ai", "learning", "torch", "pandas", "algorithm"]):
         prompts.append(TECH_PROMPT)
 
-    # Kiberxavfsizlik
     if any(w in t for w in ["xavfsiz", "kiber", "injection", "brute", "hujum", "attack", "parol", "auth", "token", "jwt", "hack"]):
         prompts.append(CYBER_PROMPT)
 
-    # Biznes / Startup / Moliya
     if any(w in t for w in ["pul", "biznes", "startup", "investor", "daromad", "sotish", "saas", "narx", "pricing", "bozor"]):
         prompts.append(BUSINESS_PROMPT)
 
-    # Qidiruv / Tadqiqot
     if any(w in t for w in ["qidir", "maqola", "arxiv", "github", "repo", "dataset", "topib"]):
         prompts.append(RESEARCH_PROMPT)
 

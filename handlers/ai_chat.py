@@ -1,4 +1,4 @@
-# handlers/ai_chat.py — Tezkor va xavfsiz AI suhbat handler
+# handlers/ai_chat.py — Tezkor, Real-time Web va Xavfsiz AI Handler
 import re
 import logging
 from datetime import datetime, timedelta
@@ -9,7 +9,7 @@ from services.db import get_or_create_user, save_message, add_reminder
 from services.ai_engine import get_ai_response
 from services.context_builder import build_context
 from services.memory_manager import memory_manager
-from services.tools.web_search import web_search
+from services.tools.web_search import web_search, search_and_augment
 from services.tools.github_search import github_search
 from services.tools.arxiv_search import arxiv_search
 from services.tools.kaggle_search import kaggle_search
@@ -25,7 +25,6 @@ tz = pytz.timezone(TIMEZONE)
 
 async def safe_reply(message: Message, text: str, thinking_msg: Message = None):
     """Xabarni xavfsiz yuborish (Markdown xatolarini ushlaydi va uzun xabarlarni bo'ladi)."""
-    # 4000 belgidan uzun bo'lsa bo'laklash
     chunks = [text[i:i+4000] for i in range(0, len(text), 4000)] if len(text) > 4000 else [text]
 
     for idx, chunk in enumerate(chunks):
@@ -35,7 +34,6 @@ async def safe_reply(message: Message, text: str, thinking_msg: Message = None):
             else:
                 await message.answer(chunk, parse_mode="Markdown")
         except TelegramBadRequest:
-            # Agar Markdown parsing xato bersa oddiy matn sifatida chiqaradi
             if idx == 0 and thinking_msg:
                 await thinking_msg.edit_text(chunk, parse_mode=None)
             else:
@@ -43,7 +41,6 @@ async def safe_reply(message: Message, text: str, thinking_msg: Message = None):
 
 
 def _detect_intent(text: str) -> str:
-    """Matn maqsadini aniqlash."""
     t = text.lower()
     if any(w in t for w in ["eslat", "eslatma", "yodlatir", "reminder", "ertaga", "bugun"]) and any(c.isdigit() for c in t):
         return "reminder"
@@ -55,7 +52,7 @@ def _detect_intent(text: str) -> str:
         return "arxiv"
     if any(w in t for w in ["dataset", "kaggle", "huggingface"]):
         return "kaggle"
-    if any(w in t for w in ["qidir", "topib ber", "internetdan qidir"]):
+    if any(w in t for w in ["internetdan qidir", "web search", "google qidir", "saytlardan top"]):
         return "web_search"
     if any(w in t for w in ["men haqimda nima bilasan", "xotirangdagi faktlar", "xotirangni ko'rsat"]):
         return "memory_recall"
@@ -99,7 +96,6 @@ async def handle_text(message: Message):
     text = message.text.strip()
     intent = _detect_intent(text)
 
-    # Typing indikatorini yoqish
     await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
 
     if intent == "reminder":
@@ -148,8 +144,8 @@ async def handle_text(message: Message):
         return
 
     if intent == "web_search":
-        query = re.sub(r"qidir|topib ber|internetdan qidir", "", text, flags=re.IGNORECASE).strip()
-        thinking = await message.answer("🔎 Internetda qidiryapman...")
+        query = re.sub(r"internetdan qidir|web search|google qidir|saytlardan top", "", text, flags=re.IGNORECASE).strip()
+        thinking = await message.answer("🌐 Internetda jonli qidiryapman...")
         result = await web_search(query or text)
         await safe_reply(message, result, thinking)
         return
@@ -165,17 +161,29 @@ async def handle_text(message: Message):
             await message.answer("\n".join(lines), parse_mode="Markdown")
         return
 
-    # --- ASOSIY AI JAVOB (Tezkor: ~1 soniya) ---
+    # --- ASOSIY AI JAVOB ---
     await save_message(user.id, "user", text)
     thinking = await message.answer("⚡ Javob tayyorlanmoqda...")
 
+    # Agar savol dolzarb yangilik, yil yoki faktlar haqida bo'lsa real-time qidiruv qo'shiladi
+    live_search_info = ""
+    t_lower = text.lower()
+    if any(k in t_lower for k in ["2025", "2026", "yangilik", "ob-havo", "kurs", "dollar", "hozirgi", "bugungi"]):
+        try:
+            live_search_info = await search_and_augment(text)
+        except Exception:
+            pass
+
     context = await build_context(user.id, current_query=text)
+    if live_search_info:
+        context.append({"role": "user", "content": live_search_info})
+
     response, model_used = await get_ai_response(context)
 
     await save_message(user.id, "assistant", response)
     await safe_reply(message, response, thinking)
 
-    # Qisqa texnik vazifalarni avtomatik xotiraga olish
+    # Qisqa ML/DS atamalarni xotiraga olish
     ml_terms = ["one hot encoding", "dropout", "fine-tuning", "rag", "rlhf", "regularization", "hyperparameter"]
     for term in ml_terms:
         if term in text.lower():
