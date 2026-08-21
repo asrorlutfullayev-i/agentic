@@ -42,8 +42,13 @@ async def safe_reply(message: Message, text: str, thinking_msg: Message = None):
 
 def _detect_intent(text: str) -> str:
     t = text.lower()
-    if any(w in t for w in ["eslat", "eslatma", "yodlatir", "reminder", "ertaga", "bugun"]) and any(c.isdigit() for c in t):
+    # Eslatma va taymer iboralari
+    time_words = ["daqiqa", "minut", "min", "soat", "ertaga", "indinga", "sekund"]
+    action_words = ["eslat", "eslatma", "xabar yubor", "yoz", "ayt", "reminder", "ogohlantir", "kn", "keyin"]
+
+    if (any(w in t for w in action_words) and any(w in t for w in time_words)) or ("daqiqadan" in t or "minutdan" in t or "soatdan" in t):
         return "reminder"
+
     if any(w in t for w in ["hisobla", "hisopla", "necha", "qo'sh", "ayir", "ko'paytir"]):
         return "calculator"
     if any(w in t for w in ["github", "repo", "loyiha kodi"]):
@@ -59,31 +64,41 @@ def _detect_intent(text: str) -> str:
     return "chat"
 
 
-async def _parse_reminder_time(text: str) -> datetime | None:
-    now = datetime.now(tz)
+def _parse_reminder_time(text: str) -> tuple[datetime | None, str]:
+    """Matndan vaqt va vazifa matnini ajratib oladi (Toshkent vaqti)."""
+    now_tashkent = datetime.now(tz).replace(tzinfo=None)
     t = text.lower()
+
+    # Daqiqa / Minut
+    min_match = re.search(r"(\d+)\s*(?:daqiqa|minut|min)", t)
+    if min_match:
+        minutes = int(min_match.group(1))
+        remind_at = now_tashkent + timedelta(minutes=minutes)
+        # Sarlavhadan vaqt so'zlarini tozalash
+        clean_title = re.sub(r"\d+\s*(?:daqiqa|minut|min)\w*\s*(?:kn|keyin|so'ng)?", "", text, flags=re.IGNORECASE).strip()
+        clean_title = re.sub(r"^(?:menga|men|deb|eslat|xabar yubor|yoz|ayt|ok)\s*", "", clean_title, flags=re.IGNORECASE).strip()
+        clean_title = re.sub(r"\s*(?:deb|eslat|xabar yubor|yoz|ayt|ok)$", "", clean_title, flags=re.IGNORECASE).strip()
+        return remind_at, clean_title or text
+
+    # Soatdan keyin
+    hr_match = re.search(r"(\d+)\s*soat", t)
+    if "soatdan" in t or "soat keyin" in t or "soat kn" in t:
+        if hr_match:
+            hours = int(hr_match.group(1))
+            remind_at = now_tashkent + timedelta(hours=hours)
+            return remind_at, text
+
+    # Aniq soat (masalan 18:30 yoki soat 18 da)
     time_match = re.search(r"(\d{1,2})[:\.](\d{2})", t)
-    hour, minute = (int(time_match.group(1)), int(time_match.group(2))) if time_match else (None, None)
-
-    if "ertaga" in t:
-        base = now + timedelta(days=1)
-    elif "indinga" in t:
-        base = now + timedelta(days=2)
-    elif re.search(r"(\d+)\s*daqiqa", t):
-        mins = int(re.search(r"(\d+)\s*daqiqa", t).group(1))
-        return now + timedelta(minutes=mins)
-    elif re.search(r"(\d+)\s*soatdan", t):
-        hrs = int(re.search(r"(\d+)\s*soatdan", t).group(1))
-        return now + timedelta(hours=hrs)
-    else:
-        base = now
-
-    if hour is not None:
+    if time_match:
+        hour, minute = int(time_match.group(1)), int(time_match.group(2))
+        base = now_tashkent + timedelta(days=1) if "ertaga" in t else now_tashkent
         remind_at = base.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if remind_at <= now:
+        if remind_at <= now_tashkent:
             remind_at += timedelta(days=1)
-        return remind_at
-    return None
+        return remind_at, text
+
+    return None, text
 
 
 @router.message(F.text)
@@ -99,18 +114,22 @@ async def handle_text(message: Message):
     await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
 
     if intent == "reminder":
-        remind_at = await _parse_reminder_time(text)
+        remind_at, clean_title = _parse_reminder_time(text)
         if remind_at:
-            await add_reminder(user.id, text, remind_at.astimezone(pytz.utc).replace(tzinfo=None))
+            # Toshkent vaqti bo'yicha bazaga saqlash
+            await add_reminder(user.id, clean_title, remind_at)
             t_str = remind_at.strftime("%Y-%m-%d %H:%M")
             await message.answer(
-                f"✅ Eslatma saqlandi!\n\n📌 **{text}**\n⏰ Vaqt: **{t_str}** ({TIMEZONE})\n\nVaqti kelganda eslataman! 💪",
+                f"✅ **Eslatma saqlandi!**\n\n"
+                f"📌 Vazifa: **{clean_title}**\n"
+                f"⏰ Vaqt: **{t_str}** (Toshkent vaqti)\n\n"
+                f"💪 _Aniq belgilangan vaqtda xabar beraman!_",
                 parse_mode="Markdown",
             )
             return
         else:
             await message.answer(
-                "⚠️ Aniq vaqtni aniqlay olmadim. Masalan:\n_\"Ertaga soat 14:30 da X ni eslat\"_",
+                "⚠️ Aniq vaqtni aniqlay olmadim. Masalan:\n_\"1 daqiqadan kn darsni eslat\"_\n_\"Ertaga soat 14:30 da X ni eslat\"_",
                 parse_mode="Markdown",
             )
             return
@@ -165,7 +184,6 @@ async def handle_text(message: Message):
     await save_message(user.id, "user", text)
     thinking = await message.answer("⚡ Javob tayyorlanmoqda...")
 
-    # Agar savol dolzarb yangilik, yil yoki faktlar haqida bo'lsa real-time qidiruv qo'shiladi
     live_search_info = ""
     t_lower = text.lower()
     if any(k in t_lower for k in ["2025", "2026", "yangilik", "ob-havo", "kurs", "dollar", "hozirgi", "bugungi"]):
@@ -183,7 +201,6 @@ async def handle_text(message: Message):
     await save_message(user.id, "assistant", response)
     await safe_reply(message, response, thinking)
 
-    # Qisqa ML/DS atamalarni xotiraga olish
     ml_terms = ["one hot encoding", "dropout", "fine-tuning", "rag", "rlhf", "regularization", "hyperparameter"]
     for term in ml_terms:
         if term in text.lower():
