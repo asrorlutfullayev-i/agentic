@@ -1,6 +1,7 @@
-﻿# services/db.py — Database connection va CRUD operatsiyalar
+# services/db.py — Database connection va CRUD operatsiyalar
 from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+from sqlalchemy.orm import selectinload
 from sqlalchemy import select, delete
 from config import DATABASE_URL
 from models.base import Base
@@ -14,7 +15,6 @@ AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 
 async def init_db() -> None:
-    """Jadvallarni yaratish (birinchi ishga tushganda)."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
@@ -119,7 +119,7 @@ async def delete_memory(memory_id: int, user_id: int) -> bool:
         return False
 
 
-# --- REMINDER CRUD ---
+# --- REMINDER CRUD (Eslatmalar foydalanuvchi ma'lumotlari bilan yuklanadi) ---
 async def add_reminder(user_id: int, title: str, remind_at: datetime) -> Reminder:
     async with AsyncSessionLocal() as session:
         r = Reminder(user_id=user_id, title=title, remind_at=remind_at)
@@ -142,9 +142,12 @@ async def get_pending_reminders(user_id: int) -> list[Reminder]:
 async def get_all_pending_reminders() -> list[Reminder]:
     async with AsyncSessionLocal() as session:
         result = await session.execute(
-            select(Reminder).where(Reminder.status == "pending").order_by(Reminder.remind_at)
+            select(Reminder)
+            .options(selectinload(Reminder.user))
+            .where(Reminder.status == "pending")
+            .order_by(Reminder.remind_at)
         )
-        return result.scalars().all()
+        return list(result.scalars().all())
 
 
 async def mark_reminder_sent(reminder_id: int) -> None:
