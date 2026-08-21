@@ -1,0 +1,13 @@
+# Environment
+.env
+*.db
+*.sqlite3
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+bot_data.db
+voice_cache/
+downloads/
+logs/
+*.log
